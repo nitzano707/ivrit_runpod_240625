@@ -13,6 +13,7 @@
         button:disabled { background: #aaa; cursor: wait; }
         #progress { margin: 1em 0; text-align: center; font-size: 1em; color: #27408b;}
         #result { margin-top: 2em; background: #f0f4ff; border-radius: 1em; padding: 1em; font-size: 1.1em; min-height: 2em; white-space: pre-wrap; }
+        #timer { color: #888; font-size: 0.9em; margin-top: 0.2em;}
     </style>
 </head>
 <body>
@@ -28,15 +29,21 @@
     </label>
     <button id="sendBtn" disabled>העלה ושלח לתמלול</button>
     <div id="progress"></div>
+    <div id="timer"></div>
     <div id="result"></div>
 </div>
 
 <script>
+    // הגדרות
+    const ENDPOINT_ID = "b7opgnxuuvzhzx"; // שנה לפי הצורך
+
+    // בחירת אלמנטים
     const apiInput = document.getElementById('apiKey');
     const fileInput = document.getElementById('audioInput');
     const sendBtn = document.getElementById('sendBtn');
     const progress = document.getElementById('progress');
     const result = document.getElementById('result');
+    const timerDiv = document.getElementById('timer');
     let selectedFile = null;
 
     apiInput.addEventListener('input', checkReady);
@@ -61,6 +68,7 @@
     sendBtn.addEventListener('click', async () => {
         progress.textContent = '';
         result.textContent = '';
+        timerDiv.textContent = '';
         sendBtn.disabled = true;
         if (!apiInput.value || !selectedFile) {
             progress.textContent = "יש להזין מפתח API ולבחור קובץ";
@@ -73,7 +81,6 @@
             return;
         }
         progress.textContent = "מעלה קובץ ומבצע שליחה...";
-
         try {
             const base64 = await fileToBase64(selectedFile);
             progress.textContent = "הקובץ הומר, שולח לשרת...";
@@ -85,7 +92,8 @@
                     engine: "faster-whisper"
                 }
             };
-            const response = await fetch("https://api.runpod.ai/v2/b7opgnxuuvzhzx/run", {
+            const url = `https://api.runpod.ai/v2/${ENDPOINT_ID}/run`;
+            const response = await fetch(url, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -97,15 +105,16 @@
             if (!response.ok) {
                 throw new Error("שגיאת שרת: " + response.status);
             }
-            progress.textContent = "ממתין לתוצאה...";
+
             const data = await response.json();
-            // תוצאה טיפוסית: { id, status, output, ... }
-            if (data.output && data.output.text) {
+            // נבדוק האם יש id - אם כן צריך לפול (polling)
+            if (data.id) {
+                progress.textContent = "הבקשה בתור... מבצע המתנה לתוצאה (זה עלול לקחת 10-60 שניות)";
+                await pollForResult(data.id, apiInput.value.trim());
+            } else if (data.output && data.output.text) {
+                // קיבלנו תוצאה מיידית (נדיר)
                 result.textContent = data.output.text;
                 progress.textContent = "הסתיים בהצלחה!";
-            } else if (data.status === "FAILED") {
-                result.textContent = "שגיאת עיבוד: " + (data.output?.error || "לא ידועה");
-                progress.textContent = "נכשל.";
             } else {
                 result.textContent = JSON.stringify(data, null, 2);
                 progress.textContent = "קיבלנו תגובה לא צפויה.";
@@ -116,6 +125,43 @@
         }
         sendBtn.disabled = false;
     });
+
+    // פונקציית polling לקבלת תוצאה מהשרת
+    async function pollForResult(jobId, apiKey) {
+        const statusUrl = `https://api.runpod.ai/v2/${ENDPOINT_ID}/status/${jobId}`;
+        let status = "";
+        let start = Date.now();
+        let count = 0;
+        while (count < 60) { // עד דקה (60 סבבים של שניה)
+            timerDiv.textContent = `המתנה: ${(Date.now()-start)/1000|0} שניות...`;
+            await new Promise(r => setTimeout(r, 2000)); // המתן 2 שניות
+            const res = await fetch(statusUrl, {
+                method: "GET",
+                headers: { "Authorization": apiKey }
+            });
+            if (!res.ok) {
+                result.textContent = "שגיאת polling: " + res.status;
+                progress.textContent = "התקשורת נכשלה.";
+                return;
+            }
+            const data = await res.json();
+            status = data.status;
+            if (status === "COMPLETED" && data.output && data.output.text) {
+                result.textContent = data.output.text;
+                progress.textContent = "הסתיים בהצלחה!";
+                timerDiv.textContent = "";
+                return;
+            } else if (status === "FAILED") {
+                result.textContent = "שגיאת עיבוד: " + (data.output?.error || "לא ידועה");
+                progress.textContent = "נכשל.";
+                timerDiv.textContent = "";
+                return;
+            }
+            count++;
+        }
+        progress.textContent = "עבר הזמן המקסימלי. נסה שוב או נסה קובץ קצר יותר.";
+        timerDiv.textContent = "";
+    }
 </script>
 </body>
 </html>
