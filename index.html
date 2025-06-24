@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="he">
+<head>
+    <meta charset="UTF-8">
+    <title>Ivrit-AI MP3 Transcriber v3.0</title>
+    <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; direction: rtl; background: #f8f8ff; padding: 2em; }
+        .box { background: #fff; border-radius: 1.5em; box-shadow: 0 2px 10px #0001; max-width: 600px; margin: auto; padding: 2em; }
+        h2 { text-align: center; margin-bottom: 0.2em; }
+        .version { text-align: center; font-size: 0.98em; color: #666; margin-bottom: 1em; }
+        label { display: block; margin-top: 1em; }
+        input[type="file"], input[type="text"] { width: 100%; }
+        button { margin: 1.2em 0 0.6em 0; width: 100%; padding: 0.7em; border-radius: 1em; border: none; background: #2b5fef; color: #fff; font-size: 1.1em; font-weight: bold; cursor: pointer; transition: background 0.2s; }
+        button:disabled { background: #aaa; cursor: wait; }
+        .smallbtn { width: 49%; margin: 0.2em 0.5% 0.6em 0.5%; padding: 0.5em; font-size: 1em;}
+        #progress { margin: 1em 0; text-align: center; font-size: 1em; color: #27408b;}
+        #result { margin-top: 2em; background: #f0f4ff; border-radius: 1em; padding: 1em; font-size: 1.08em; min-height: 2em; }
+        table.trans { width:100%; border-collapse:collapse; }
+        table.trans td, table.trans th { border-bottom: 1px solid #dde; padding: 0.35em 0.7em; }
+        table.trans th { background: #e5eaff; color:#345;}
+        .timestamp { color:#3260e0; font-family: monospace; direction:ltr;}
+        #timer { color: #888; font-size: 0.96em; margin-top: 0.2em;}
+        #success { color: #1c7300; text-align: center; margin: 1em 0; }
+        #error { color: #d00; text-align: center; margin: 1em 0; }
+    </style>
+    <!-- XLSX.js for Excel export -->
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+<div class="box">
+    <h2>תמלול MP3 בעברית - ivrit.ai</h2>
+    <div class="version">Ivrit-AI MP3 Transcriber v3.0</div>
+    <label>
+        מפתח API שלך ב-RunPod:
+        <input type="text" id="apiKey" placeholder="הדבק כאן את ה-API KEY שלך">
+    </label>
+    <label>
+        בחר קובץ MP3 (עד 10MB):
+        <input type="file" id="audioInput" accept=".mp3,audio/mp3">
+    </label>
+    <button id="sendBtn" disabled>העלה ושלח לתמלול</button>
+    <div id="progress"></div>
+    <div id="success"></div>
+    <div id="error"></div>
+    <div>
+        <button class="smallbtn" id="copyBtn" style="display:none">📋 העתק טבלה</button>
+        <button class="smallbtn" id="excelBtn" style="display:none">⬇️ הורד כקובץ Excel</button>
+    </div>
+    <div id="result"></div>
+</div>
+
+<script>
+const ENDPOINT_ID = "b7opgnxuuvzhzx";
+const CHUNK_SIZE = 10 * 1024 * 1024;
+let selectedFile = null, transcriptData = [];
+
+const apiInput = document.getElementById('apiKey');
+const fileInput = document.getElementById('audioInput');
+const sendBtn = document.getElementById('sendBtn');
+const progress = document.getElementById('progress');
+const result = document.getElementById('result');
+const success = document.getElementById('success');
+const error = document.getElementById('error');
+const copyBtn = document.getElementById('copyBtn');
+const excelBtn = document.getElementById('excelBtn');
+
+apiInput.addEventListener('input', checkReady);
+fileInput.addEventListener('change', e => {
+    selectedFile = e.target.files[0];
+    result.innerHTML = "";
+    error.textContent = "";
+    success.textContent = "";
+    transcriptData = [];
+    checkReady();
+});
+
+function checkReady() {
+    sendBtn.disabled = !(apiInput.value && selectedFile);
+}
+
+// עיצוב זמן
+function formatTime(sec) {
+    if (isNaN(sec)) return '--:--';
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+// שליחת קובץ יחיד ל-API
+async function sendMp3ToApi(base64, apiKey) {
+    const payload = {
+        input: {
+            type: "blob",
+            data: base64,
+            model: "ivrit-ai/whisper-large-v3-turbo-ct2",
+            engine: "faster-whisper"
+        }
+    };
+    const url = `https://api.runpod.ai/v2/${ENDPOINT_ID}/run`;
+    progress.innerHTML = "מעבד קובץ...";
+    const response = await fetch(url, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "Authorization": apiKey
+        },
+        body: JSON.stringify(payload)
+    });
+    if (!response.ok) throw new Error("שגיאת שליחה: " + response.status);
+    const data = await response.json();
+    if (!data.id) throw new Error("לא התקבל מזהה עבודה מה-API");
+    return await pollForResult(data.id, apiKey);
+}
+
+async function pollForResult(jobId, apiKey) {
+    const statusUrl = `https://api.runpod.ai/v2/${ENDPOINT_ID}/status/${jobId}`;
+    let count = 0, start = Date.now();
+    while (count < 70) {
+        progress.textContent = `המתנה: ${(Date.now()-start)/1000|0} שניות...`;
+        await new Promise(r => setTimeout(r, 2000));
+        const res = await fetch(statusUrl, {
+            method: "GET",
+            headers: { "Authorization": apiKey }
+        });
+        if (!res.ok) throw new Error("שגיאת polling: " + res.status);
+        const data = await res.json();
+        if (data.status === "COMPLETED") {
+            return extractResultOutput(data.output || data);
+        } else if (data.status === "FAILED") {
+            throw new Error("שגיאת עיבוד: " + (data.output?.error || "לא ידועה"));
+        }
+        count++;
+    }
+    throw new Error("פג זמן ההמתנה");
+}
+
+function extractResultOutput(data) {
+    if (!data) return [];
+    if (Array.isArray(data.result)) return data.result;
+    if (typeof data.text === "string") return [{start: 0, end: 0, text: data.text}];
+    if (Array.isArray(data)) {
+        let arr = [];
+        for (const item of data) {
+            if (Array.isArray(item.result)) arr = arr.concat(item.result);
+            else if (item.text) arr.push({start:0, end:0, text:item.text});
+        }
+        return arr;
+    }
+    if (data.output) return extractResultOutput(data.output);
+    return [];
+}
+
+function renderTranscript(resultArr) {
+    if (!resultArr || !resultArr.length) return "אין תמלול זמין.";
+    let html = `<table class="trans" id="transTable"><thead><tr><th>תחילה</th><th>טקסט</th><th>סוף</th></tr></thead><tbody>`;
+    for (let i=0; i<resultArr.length; ++i) {
+        const seg = resultArr[i];
+        html += `<tr>
+            <td class="timestamp">${formatTime(seg.start)}</td>
+            <td>${seg.text || ""}</td>
+            <td class="timestamp">${formatTime(seg.end)}</td>
+        </tr>`;
+    }
+    html += `</tbody></table>`;
+    return html;
+}
+
+// המרה ל-base64
+function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+    });
+}
+
+// לחצן שליחה
+sendBtn.addEventListener('click', async () => {
+    progress.textContent = "";
+    error.textContent = "";
+    success.textContent = "";
+    result.innerHTML = "";
+    copyBtn.style.display = "none";
+    excelBtn.style.display = "none";
+    transcriptData = [];
+
+    if (!apiInput.value || !selectedFile) {
+        error.textContent = "יש להזין מפתח API ולבחור קובץ";
+        return;
+    }
+
+    // בדיקת סוג וגודל
+    const fileType = selectedFile.type.toLowerCase();
+    const fileExtension = selectedFile.name.split('.').pop().toLowerCase();
+    if (!(fileType === "audio/mp3" || fileExtension === "mp3")) {
+        error.textContent = "אפשר להעלות רק קבצי MP3.";
+        return;
+    }
+    if (selectedFile.size > CHUNK_SIZE) {
+        error.innerHTML = "הקובץ גדול מ-10MB.<br>אנא דחוס/פצל קובץ MP3 בעזרת <a href='https://audioalter.com/compress' target='_blank'>AudioAlter</a> או כלי דומה והעלה שוב.";
+        return;
+    }
+
+    sendBtn.disabled = true;
+    try {
+        let base64 = await blobToBase64(selectedFile);
+        let data = await sendMp3ToApi(base64, apiInput.value.trim());
+        transcriptData = data;
+        result.innerHTML = renderTranscript(data);
+        if (data && data.length) {
+            copyBtn.style.display = "inline-block";
+            excelBtn.style.display = "inline-block";
+            success.textContent = "הסתיים בהצלחה!";
+        } else {
+            error.textContent = "לא התקבל תמלול מהשרת.";
+        }
+    } catch(err) {
+        error.textContent = "שגיאה: " + err.message;
+    }
+    sendBtn.disabled = false;
+    progress.textContent = "";
+});
+
+// לחצן העתקה
+copyBtn.addEventListener('click', () => {
+    // העתקה עם עיצוב (HTML table)
+    const el = document.getElementById('transTable');
+    if (!el) return;
+    const html = el.outerHTML;
+    const blob = new Blob([html], {type:"text/html"});
+    const data = [new ClipboardItem({'text/html': blob})];
+    navigator.clipboard.write(data).then(() => {
+        success.textContent = "הטבלה הועתקה עם עיצוב!";
+        setTimeout(()=>{success.textContent="";}, 1500);
+    }).catch(() => {
+        error.textContent = "לא הצלחנו להעתיק. נסה בדפדפן עדכני.";
+    });
+});
+
+// לחצן הורדת Excel
+excelBtn.addEventListener('click', () => {
+    if (!transcriptData || !transcriptData.length) return;
+    // מייצרים מערך מתאים ל-XLSX
+    const rows = transcriptData.map(seg => ({
+        'תחילה': formatTime(seg.start),
+        'טקסט': seg.text || "",
+        'סוף': formatTime(seg.end)
+    }));
+    const ws = XLSX.utils.json_to_sheet(rows, {header: ["תחילה", "טקסט", "סוף"]});
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "תמלול");
+    let audioName = (selectedFile && selectedFile.name) ? selectedFile.name.replace(/\.[^.]+$/,"") : "transcription";
+    XLSX.writeFile(wb, audioName + ".xlsx", {bookType:'xlsx', type: 'binary', compression: true});
+});
+</script>
+</body>
+</html>
