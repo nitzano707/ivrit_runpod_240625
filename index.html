@@ -35,7 +35,7 @@
         <input type="text" id="apiKey" placeholder="הדבק כאן את ה-API KEY שלך">
     </label>
     <label>
-        בחר קובץ MP3 (עד 10MB):
+        בחר קובץ MP3 (עד 7MB):
         <input type="file" id="audioInput" accept=".mp3,audio/mp3">
     </label>
     <button id="sendBtn" disabled>העלה ושלח לתמלול</button>
@@ -51,7 +51,7 @@
 
 <script>
 const ENDPOINT_ID = "b7opgnxuuvzhzx";
-const CHUNK_SIZE = 10 * 1024 * 1024;
+const CHUNK_SIZE = 7 * 1024 * 1024;
 let selectedFile = null, transcriptData = [];
 
 const apiInput = document.getElementById('apiKey');
