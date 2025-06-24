@@ -69,25 +69,23 @@
     }
 
     function extractResultOutput(data) {
-        // תומך בכל פורמט: result, text, רשימה, אובייקט ישיר
+        // פותר את כל הצורות:
         if (!data) return [];
-        if (Array.isArray(data)) return data;
-        if (data.result && Array.isArray(data.result)) return data.result;
-        if (Array.isArray(data.output)) {
-            // לעתים תוצאה מוחזרת ב-data.output[0].result
-            for (const d of data.output) {
-                if (d && Array.isArray(d.result)) return d.result;
+        // פלט ב-output.result רגיל
+        if (Array.isArray(data.result)) return data.result;
+        // פלט ב-output.text בלבד
+        if (typeof data.text === "string") return [{start: 0, end: 0, text: data.text}];
+        // פלט ב-output שהוא מערך
+        if (Array.isArray(data)) {
+            let arr = [];
+            for (const item of data) {
+                if (Array.isArray(item.result)) arr = arr.concat(item.result);
+                else if (item.text) arr.push({start:0, end:0, text:item.text});
             }
+            return arr;
         }
-        if (data.output && Array.isArray(data.output.result)) return data.output.result;
-        if (data.output && typeof data.output.text === "string") {
-            // תוצאה טקסטואלית בלבד
-            return [{start:0,end:0,text:data.output.text}];
-        }
-        // אפשרות אחרונה: מחרוזת טקסט ישירה
-        if (typeof data.output === "string") {
-            return [{start:0,end:0,text:data.output}];
-        }
+        // פלט ב-output שהוא מערך עם איבר result בפנים
+        if (data.output) return extractResultOutput(data.output);
         return [];
     }
 
@@ -114,7 +112,7 @@
             const seg = resultArr[i];
             html += `<tr>
                 <td class="timestamp">${formatTime(seg.start)}</td>
-                <td>${seg.text}</td>
+                <td>${seg.text || ""}</td>
                 <td class="timestamp">${formatTime(seg.end)}</td>
             </tr>`;
         }
