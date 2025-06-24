@@ -2,57 +2,55 @@
 <html lang="he">
 <head>
     <meta charset="UTF-8">
-    <title>Ivrit-AI Transcriber v1.1</title>
+    <title>Ivrit-AI Transcriber v2.0</title>
     <style>
         body { font-family: 'Segoe UI', Arial, sans-serif; direction: rtl; background: #f8f8ff; padding: 2em; }
-        .box { background: #fff; border-radius: 1.5em; box-shadow: 0 2px 10px #0001; max-width: 430px; margin: auto; padding: 2em; }
+        .box { background: #fff; border-radius: 1.5em; box-shadow: 0 2px 10px #0001; max-width: 570px; margin: auto; padding: 2em; }
         h2 { text-align: center; margin-bottom: 0.2em; }
-        .version { text-align: center; font-size: 0.95em; color: #888; margin-bottom: 1em; }
+        .version { text-align: center; font-size: 0.98em; color: #666; margin-bottom: 1em; }
         label { display: block; margin-top: 1em; }
         input[type="file"], input[type="text"] { width: 100%; }
         button { margin-top: 1.5em; width: 100%; padding: 0.7em; border-radius: 1em; border: none; background: #2b5fef; color: #fff; font-size: 1.1em; font-weight: bold; cursor: pointer; transition: background 0.2s; }
         button:disabled { background: #aaa; cursor: wait; }
         #progress { margin: 1em 0; text-align: center; font-size: 1em; color: #27408b;}
-        #result { margin-top: 2em; background: #f0f4ff; border-radius: 1em; padding: 1em; font-size: 1.1em; min-height: 2em; white-space: pre-wrap; }
-        #timer { color: #888; font-size: 0.9em; margin-top: 0.2em;}
-        #rawoutput { margin-top: 1.5em; font-size: 0.93em; color: #444; background: #f8f8f8; border-radius: 0.6em; padding: 0.6em; direction: ltr; overflow-x: auto; }
+        #result { margin-top: 2em; background: #f0f4ff; border-radius: 1em; padding: 1em; font-size: 1.08em; min-height: 2em; }
+        table.trans { width:100%; border-collapse:collapse; }
+        table.trans td, table.trans th { border-bottom: 1px solid #dde; padding: 0.35em 0.7em; }
+        table.trans th { background: #e5eaff; color:#345;}
+        .timestamp { color:#3260e0; font-family: monospace; direction:ltr;}
+        .fragloading { color:#aaa; font-size:0.9em; }
+        #timer { color: #888; font-size: 0.96em; margin-top: 0.2em;}
     </style>
 </head>
 <body>
 <div class="box">
     <h2>תמלול עברית עם ivrit.ai</h2>
-    <div class="version">Ivrit-AI Transcriber v1.1</div>
+    <div class="version">Ivrit-AI Transcriber v2.0</div>
     <label>
         מפתח API שלך ב-RunPod:
         <input type="text" id="apiKey" placeholder="הדבק כאן את ה-API KEY שלך">
     </label>
     <label>
-        בחר קובץ אודיו (עד 10MB):
+        בחר קובץ אודיו (MP3/WAV, גם מעל 10MB):
         <input type="file" id="audioInput" accept=".mp3,.wav,.m4a,audio/*">
     </label>
     <button id="sendBtn" disabled>העלה ושלח לתמלול</button>
     <div id="progress"></div>
     <div id="timer"></div>
     <div id="result"></div>
-    <details id="rawoutput" style="display:none;">
-        <summary>פלט JSON מלא</summary>
-        <pre id="rawpre"></pre>
-    </details>
 </div>
 
 <script>
-    // הגדרות
-    const ENDPOINT_ID = "b7opgnxuuvzhzx"; // שנה לפי הצורך
+    const ENDPOINT_ID = "b7opgnxuuvzhzx"; // Endpoint ID שלך
+    const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB
 
-    // בחירת אלמנטים
+    // ממשק
     const apiInput = document.getElementById('apiKey');
     const fileInput = document.getElementById('audioInput');
     const sendBtn = document.getElementById('sendBtn');
     const progress = document.getElementById('progress');
     const result = document.getElementById('result');
     const timerDiv = document.getElementById('timer');
-    const rawoutput = document.getElementById('rawoutput');
-    const rawpre = document.getElementById('rawpre');
     let selectedFile = null;
 
     apiInput.addEventListener('input', checkReady);
@@ -65,131 +63,160 @@
         sendBtn.disabled = !(apiInput.value && selectedFile);
     }
 
-    function fileToBase64(file) {
+    function formatTime(sec) {
+        if (isNaN(sec)) return '--:--';
+        const m = Math.floor(sec / 60);
+        const s = Math.floor(sec % 60);
+        return `${m}:${s.toString().padStart(2, '0')}`;
+    }
+
+    // מחבר מערכי תמלול עם תיקון החותמות (אם צריך)
+    function mergeResults(allResults) {
+        let all = [];
+        let shift = 0;
+        for (const frag of allResults) {
+            if (Array.isArray(frag)) {
+                // מתקן זמן (אם קטע שני+)
+                frag.forEach(row => {
+                    row.start += shift;
+                    row.end += shift;
+                });
+                all.push(...frag);
+                // shift מתקדם לפי הסוף האחרון
+                if (frag.length) shift = frag[frag.length-1].end;
+            }
+        }
+        return all;
+    }
+
+    // תצוגה מעוצבת של כל התמלול
+    function renderTranscript(resultArr) {
+        if (!resultArr || !resultArr.length) return "אין תמלול זמין.";
+        let html = `<table class="trans"><thead><tr><th>התחלה</th><th>טקסט</th><th>סיום</th></tr></thead><tbody>`;
+        for (let i=0; i<resultArr.length; ++i) {
+            const seg = resultArr[i];
+            html += `<tr>
+                <td class="timestamp">${formatTime(seg.start)}</td>
+                <td>${seg.text}</td>
+                <td class="timestamp">${formatTime(seg.end)}</td>
+            </tr>`;
+        }
+        html += `</tbody></table>`;
+        return html;
+    }
+
+    // קידוד Blob לבייס64
+    function blobToBase64(blob) {
         return new Promise((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = () => resolve(reader.result.split(',')[1]);
             reader.onerror = reject;
-            reader.readAsDataURL(file);
+            reader.readAsDataURL(blob);
         });
+    }
+
+    // שליחת קטע ל-API, קבלת תוצאה, כולל polling
+    async function sendChunkToApi(base64, apiKey, fragIdx, totalFrags) {
+        const payload = {
+            input: {
+                type: "blob",
+                data: base64,
+                model: "ivrit-ai/whisper-large-v3-turbo-ct2",
+                engine: "faster-whisper"
+            }
+        };
+        const url = `https://api.runpod.ai/v2/${ENDPOINT_ID}/run`;
+        progress.innerHTML = `מעבד חלק ${fragIdx+1} מתוך ${totalFrags}...`;
+        const response = await fetch(url, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": apiKey
+            },
+            body: JSON.stringify(payload)
+        });
+        if (!response.ok) throw new Error("שגיאת שליחה: " + response.status);
+        const data = await response.json();
+        if (!data.id) throw new Error("לא התקבל מזהה עבודה מה-API");
+        // Polling
+        return await pollForResult(data.id, apiKey, fragIdx, totalFrags);
+    }
+
+    async function pollForResult(jobId, apiKey, fragIdx, totalFrags) {
+        const statusUrl = `https://api.runpod.ai/v2/${ENDPOINT_ID}/status/${jobId}`;
+        let count = 0, start = Date.now();
+        while (count < 70) { // עד ~2 דקות
+            timerDiv.textContent = `חלק ${fragIdx+1}/${totalFrags} - המתנה: ${(Date.now()-start)/1000|0} שניות...`;
+            await new Promise(r => setTimeout(r, 2000));
+            const res = await fetch(statusUrl, {
+                method: "GET",
+                headers: { "Authorization": apiKey }
+            });
+            if (!res.ok) throw new Error("שגיאת polling: " + res.status);
+            const data = await res.json();
+            if (data.status === "COMPLETED") {
+                // יתכן data.output.text או data.output.result
+                if (Array.isArray(data.output?.result)) return data.output.result;
+                if (typeof data.output?.text === "string") return [{start:0,end:0,text:data.output.text}];
+                return [];
+            } else if (data.status === "FAILED") {
+                throw new Error("החלק נכשל: " + (data.output?.error || "לא ידועה"));
+            }
+            count++;
+        }
+        throw new Error("פג זמן ההמתנה לקטע " + (fragIdx+1));
+    }
+
+    // חיתוך Blob לחלקים של עד 10MB
+    function splitBlob(blob, chunkSize) {
+        let frags = [];
+        for(let i=0; i<blob.size; i+=chunkSize) {
+            frags.push(blob.slice(i, i+chunkSize));
+        }
+        return frags;
     }
 
     sendBtn.addEventListener('click', async () => {
         progress.textContent = '';
-        result.textContent = '';
+        result.innerHTML = '';
         timerDiv.textContent = '';
-        rawoutput.style.display = 'none';
-        rawpre.textContent = '';
         sendBtn.disabled = true;
+
         if (!apiInput.value || !selectedFile) {
             progress.textContent = "יש להזין מפתח API ולבחור קובץ";
             sendBtn.disabled = false;
             return;
         }
-        if (selectedFile.size > 10 * 1024 * 1024) {
-            progress.textContent = "הקובץ גדול מדי (מעל 10MB)";
+        if (selectedFile.size === 0) {
+            progress.textContent = "הקובץ ריק";
             sendBtn.disabled = false;
             return;
         }
-        progress.textContent = "מעלה קובץ ומבצע שליחה...";
-        try {
-            const base64 = await fileToBase64(selectedFile);
-            progress.textContent = "הקובץ הומר, שולח לשרת...";
-            const payload = {
-                input: {
-                    type: "blob",
-                    data: base64,
-                    model: "ivrit-ai/whisper-large-v3-turbo-ct2",
-                    engine: "faster-whisper"
-                }
-            };
-            const url = `https://api.runpod.ai/v2/${ENDPOINT_ID}/run`;
-            const response = await fetch(url, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "Authorization": apiInput.value.trim()
-                },
-                body: JSON.stringify(payload)
-            });
 
-            if (!response.ok) {
-                throw new Error("שגיאת שרת: " + response.status);
-            }
+        let frags = splitBlob(selectedFile, CHUNK_SIZE);
+        progress.innerHTML = frags.length > 1 ? `הקובץ גדול – יפוצל ל-${frags.length} חלקים.<br>המתן לתמלול רציף.` : "מעבד קובץ...";
 
-            const data = await response.json();
-            // נבדוק האם יש id - אם כן צריך לפול (polling)
-            if (data.id) {
-                progress.textContent = "הבקשה בתור... מחכה לתוצאה (10-60 שניות)";
-                await pollForResult(data.id, apiInput.value.trim());
-            } else if (data.output && data.output.text) {
-                // קיבלנו תוצאה מיידית (נדיר)
-                result.textContent = data.output.text;
-                progress.textContent = "הסתיים בהצלחה!";
-            } else {
-                result.textContent = JSON.stringify(data, null, 2);
-                progress.textContent = "קיבלנו תגובה לא צפויה.";
+        let allResults = [], hadError = false;
+        for(let i=0; i<frags.length; ++i) {
+            try {
+                // קידוד ושליחה
+                let base64 = await blobToBase64(frags[i]);
+                let fragRes = await sendChunkToApi(base64, apiInput.value.trim(), i, frags.length);
+                allResults.push(fragRes);
+                // הצגה בשלבים
+                let merged = mergeResults(allResults);
+                result.innerHTML = renderTranscript(merged);
+            } catch(err) {
+                result.innerHTML += `<div style="color:#b00">שגיאה בחלק ${i+1}: ${err.message}</div>`;
+                hadError = true;
+                break;
             }
-        } catch (err) {
-            result.textContent = "שגיאה: " + err.message;
-            progress.textContent = "נכשל.";
         }
+        timerDiv.textContent = "";
+        if (!hadError) progress.textContent = "הסתיים בהצלחה!";
+        else progress.textContent = "תהליך לא הושלם.";
         sendBtn.disabled = false;
     });
-
-    // פונקציית polling לקבלת תוצאה מהשרת
-    async function pollForResult(jobId, apiKey) {
-        const statusUrl = `https://api.runpod.ai/v2/${ENDPOINT_ID}/status/${jobId}`;
-        let status = "";
-        let start = Date.now();
-        let count = 0;
-        while (count < 60) { // עד דקה (60 סבבים של שניה)
-            timerDiv.textContent = `המתנה: ${(Date.now()-start)/1000|0} שניות...`;
-            await new Promise(r => setTimeout(r, 2000)); // המתן 2 שניות
-            const res = await fetch(statusUrl, {
-                method: "GET",
-                headers: { "Authorization": apiKey }
-            });
-            if (!res.ok) {
-                result.textContent = "שגיאת polling: " + res.status;
-                progress.textContent = "התקשורת נכשלה.";
-                timerDiv.textContent = "";
-                return;
-            }
-            const data = await res.json();
-            status = data.status;
-            // הצגת JSON מלא:
-            rawoutput.style.display = "block";
-            rawpre.textContent = JSON.stringify(data, null, 2);
-            // ניסיון לתמצת תוצאה:
-            if (status === "COMPLETED") {
-                let text = "";
-                // בדיקת פורמט תוצאה: output.text או output.result
-                if (data.output) {
-                    if (typeof data.output.text === "string") {
-                        text = data.output.text;
-                    } else if (Array.isArray(data.output.result)) {
-                        // מחבר את כל הקטעים לשרשור
-                        text = data.output.result.map(seg => seg.text).join(" ");
-                    } else {
-                        text = JSON.stringify(data.output);
-                    }
-                }
-                result.textContent = text || "לא נמצאה תוצאה מילולית.";
-                progress.textContent = "הסתיים בהצלחה!";
-                timerDiv.textContent = "";
-                return;
-            } else if (status === "FAILED") {
-                result.textContent = "שגיאת עיבוד: " + (data.output?.error || "לא ידועה");
-                progress.textContent = "נכשל.";
-                timerDiv.textContent = "";
-                return;
-            }
-            count++;
-        }
-        progress.textContent = "עבר הזמן המקסימלי. נסה שוב או נסה קובץ קצר יותר.";
-        timerDiv.textContent = "";
-    }
 </script>
 </body>
 </html>
