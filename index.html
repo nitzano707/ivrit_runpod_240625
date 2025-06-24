@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="he">
+<head>
+    <meta charset="UTF-8">
+    <title>Ivrit-AI Transcriber v2.4</title>
+    <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; direction: rtl; background: #f8f8ff; padding: 2em; }
+        .box { background: #fff; border-radius: 1.5em; box-shadow: 0 2px 10px #0001; max-width: 600px; margin: auto; padding: 2em; }
+        h2 { text-align: center; margin-bottom: 0.2em; }
+        .version { text-align: center; font-size: 0.98em; color: #666; margin-bottom: 1em; }
+        label { display: block; margin-top: 1em; }
+        input[type="file"], input[type="text"] { width: 100%; }
+        button { margin-top: 1.5em; width: 100%; padding: 0.7em; border-radius: 1em; border: none; background: #2b5fef; color: #fff; font-size: 1.1em; font-weight: bold; cursor: pointer; transition: background 0.2s; }
+        button:disabled { background: #aaa; cursor: wait; }
+        #progress { margin: 1em 0; text-align: center; font-size: 1em; color: #27408b;}
+        #result { margin-top: 2em; background: #f0f4ff; border-radius: 1em; padding: 1em; font-size: 1.08em; min-height: 2em; }
+        table.trans { width:100%; border-collapse:collapse; }
+        table.trans td, table.trans th { border-bottom: 1px solid #dde; padding: 0.35em 0.7em; }
+        table.trans th { background: #e5eaff; color:#345;}
+        .timestamp { color:#3260e0; font-family: monospace; direction:ltr;}
+        #timer { color: #888; font-size: 0.96em; margin-top: 0.2em;}
+    </style>
+</head>
+<body>
+<div class="box">
+    <h2>תמלול עברית עם ivrit.ai</h2>
+    <div class="version">Ivrit-AI Transcriber v2.4</div>
+    <label>
+        מפתח API שלך ב-RunPod:
+        <input type="text" id="apiKey" placeholder="הדבק כאן את ה-API KEY שלך">
+    </label>
+    <label>
+        בחר קובץ אודיו (MP3/WAV, עד 10MB לקובץ בודד):
+        <input type="file" id="audioInput" accept=".mp3,.wav,.m4a,.mp4,audio/*">
+    </label>
+    <button id="sendBtn" disabled>העלה ושלח לתמלול</button>
+    <div id="progress"></div>
+    <div id="timer"></div>
+    <div id="result"></div>
+</div>
+
+<script>
+    const ENDPOINT_ID = "b7opgnxuuvzhzx";
+    const CHUNK_SIZE = 10 * 1024 * 1024;
+
+    const apiInput = document.getElementById('apiKey');
+    const fileInput = document.getElementById('audioInput');
+    const sendBtn = document.getElementById('sendBtn');
+    const progress = document.getElementById('progress');
+    const result = document.getElementById('result');
+    const timerDiv = document.getElementById('timer');
+    let selectedFile = null;
+
+    apiInput.addEventListener('input', checkReady);
+    fileInput.addEventListener('change', e => {
+        selectedFile = e.target.files[0];
+        checkReady();
+    });
+
+    function checkReady() {
+        sendBtn.disabled = !(apiInput.value && selectedFile);
+    }
+
+    function formatTime(sec) {
+        if (isNaN(sec)) return '--:--';
+        const m = Math.floor(sec / 60);
+        const s = Math.floor(sec % 60);
+        return `${m}:${s.toString().padStart(2, '0')}`;
+    }
+
+    function extractResultOutput(data) {
+        if (!data) return [];
+        if (Array.isArray(data.result)) return data.result;
+        if (typeof data.text === "string") return [{start: 0, end: 0, text: data.text}];
+        if (Array.isArray(data)) {
+            let arr = [];
+            for (const item of data) {
+                if (Array.isArray(item.result)) arr = arr.concat(item.result);
+                else if (item.text) arr.push({start:0, end:0, text:item.text});
+            }
+            return arr;
+        }
+        if (data.output) return extractResultOutput(data.output);
+        return [];
+    }
+
+    function mergeResults(allResults) {
+        let all = [];
+        let shift = 0;
+        for (const frag of allResults) {
+            if (Array.isArray(frag)) {
+                frag.forEach(row => {
+                    row.start += shift;
+                    row.end += shift;
+                });
+                all.push(...frag);
+                if (frag.length) shift = all[all.length-1].end;
+            }
+        }
+        return all;
+    }
+
+    function renderTranscript(resultArr) {
+        if (!resultArr || !resultArr.length) return "אין תמלול זמין.";
+        let html = `<table class="trans"><thead><tr><th>התחלה</th><th>טקסט</th><th>סיום</th></tr></thead><tbody>`;
+        for (let i=0; i<resultArr.length; ++i) {
+            const seg = resultArr[i];
+            html += `<tr>
+                <td class="timestamp">${formatTime(seg.start)}</td>
+                <td>${seg.text || ""}</td>
+                <td class="timestamp">${formatTime(seg.end)}</td>
+            </tr>`;
+        }
+        html += `</tbody></table>`;
+        return html;
+    }
+
+    function blobToBase64(blob) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result.split(',')[1]);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+        });
+    }
+
+    async function sendChunkToApi(base64, apiKey, fragIdx, totalFrags) {
+        const payload = {
+            input: {
+                type: "blob",
+                data: base64,
+                model: "ivrit-ai/whisper-large-v3-turbo-ct2",
+                engine: "faster-whisper"
+            }
+        };
+        const url = `https://api.runpod.ai/v2/${ENDPOINT_ID}/run`;
+        progress.innerHTML = `מעבד חלק ${fragIdx+1} מתוך ${totalFrags}...`;
+        const response = await fetch(url, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": apiKey
+            },
+            body: JSON.stringify(payload)
+        });
+        if (!response.ok) throw new Error("שגיאת שליחה: " + response.status);
+        const data = await response.json();
+        if (!data.id) throw new Error("לא התקבל מזהה עבודה מה-API");
+        return await pollForResult(data.id, apiKey, fragIdx, totalFrags);
+    }
+
+    async function pollForResult(jobId, apiKey, fragIdx, totalFrags) {
+        const statusUrl = `https://api.runpod.ai/v2/${ENDPOINT_ID}/status/${jobId}`;
+        let count = 0, start = Date.now();
+        while (count < 70) {
+            timerDiv.textContent = `חלק ${fragIdx+1}/${totalFrags} - המתנה: ${(Date.now()-start)/1000|0} שניות...`;
+            await new Promise(r => setTimeout(r, 2000));
+            const res = await fetch(statusUrl, {
+                method: "GET",
+                headers: { "Authorization": apiKey }
+            });
+            if (!res.ok) throw new Error("שגיאת polling: " + res.status);
+            const data = await res.json();
+            if (data.status === "COMPLETED") {
+                return extractResultOutput(data.output || data);
+            } else if (data.status === "FAILED") {
+                throw new Error("החלק נכשל: " + (data.output?.error || "לא ידועה"));
+            }
+            count++;
+        }
+        throw new Error("פג זמן ההמתנה לקטע " + (fragIdx+1));
+    }
+
+    // --- פיצול MP3 לפי headers ---
+    function findNextMp3FrameHeader(data, startOffset) {
+        for (let i = startOffset; i < data.length - 1; i++) {
+            if (data[i] === 0xFF && (data[i + 1] & 0xE0) === 0xE0) {
+                return i;
+            }
+        }
+        return null;
+    }
+
+    async function splitMp3ByFrameHeaders(file, maxChunkSizeBytes) {
+        const arrayBuffer = await file.arrayBuffer();
+        const data = new Uint8Array(arrayBuffer);
+        const chunks = [];
+        let start = 0;
+
+        while (start < data.length) {
+            let end = Math.min(start + maxChunkSizeBytes, data.length);
+            // התחלת chunk – תמיד על header
+            start = findNextMp3FrameHeader(data, start) || start;
+            // סוף chunk: חפש header קרוב קדימה, אם יש
+            let nextHeader = findNextMp3FrameHeader(data, end);
+            if (nextHeader && nextHeader - end < 10000) { // פיצול נוח על header קרוב
+                end = nextHeader;
+            }
+            const chunkData = data.slice(start, end);
+            chunks.push(new Blob([chunkData], { type: 'audio/mp3' }));
+            start = end;
+        }
+        return chunks;
+    }
+
+    // --- פיצול WAV ע"י AudioBuffer ---
+    async function splitAudioFileToWavChunks(file, maxChunkSizeBytes) {
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        let arrayBuffer;
+        try {
+            arrayBuffer = await file.arrayBuffer();
+        } catch (e) {
+            alert("שגיאה בקריאת הקובץ.");
+            return [];
+        }
+        let audioBuffer;
+        try {
+            audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+        } catch (e) {
+            alert("קובץ לא נתמך או פגום.");
+            return [];
+        }
+        const sampleRate = audioBuffer.sampleRate;
+        const numChannels = audioBuffer.numberOfChannels;
+        const totalDuration = audioBuffer.duration;
+
+        let estimatedChunkDuration = (maxChunkSizeBytes / (sampleRate * numChannels * 2));
+        if (estimatedChunkDuration <= 0.1) estimatedChunkDuration = 1;
+        const numberOfChunks = Math.ceil(totalDuration / estimatedChunkDuration);
+        const chunkDuration = totalDuration / numberOfChunks;
+
+        let currentTime = 0;
+        const chunks = [];
+        while (currentTime < totalDuration) {
+            const end = Math.min(currentTime + chunkDuration, totalDuration);
+            if (end <= currentTime || (end - currentTime) < 0.01) break;
+            const frameCount = Math.floor((end - currentTime) * sampleRate);
+            if (frameCount <= 0) {
+                currentTime = end;
+                continue;
+            }
+            const chunkBuffer = audioContext.createBuffer(numChannels, frameCount, sampleRate);
+            for (let channel = 0; channel < numChannels; channel++) {
+                const originalChannelData = audioBuffer.getChannelData(channel);
+                const chunkChannelData = chunkBuffer.getChannelData(channel);
+                for (let i = 0; i < frameCount; i++) {
+                    chunkChannelData[i] = originalChannelData[Math.floor(currentTime * sampleRate) + i];
+                }
+            }
+            const blob = bufferToWaveBlob(chunkBuffer);
+            if (blob.size > maxChunkSizeBytes) {
+                const subChunks = await splitAudioFileToWavChunks(blob, maxChunkSizeBytes);
+                chunks.push(...subChunks);
+            } else {
+                chunks.push(blob);
+            }
+            currentTime = end;
+        }
+        return chunks;
+    }
+
+    function bufferToWaveBlob(abuffer) {
+        const numOfChan = abuffer.numberOfChannels;
+        const length = abuffer.length * numOfChan * 2 + 44;
+        const buffer = new ArrayBuffer(length);
+        const view = new DataView(buffer);
+        const channels = [];
+        let offset = 0;
+        let pos = 0;
+        function setUint16(data) {
+            view.setUint16(pos, data, true); pos += 2;
+        }
+        function setUint32(data) {
+            view.setUint32(pos, data, true); pos += 4;
+        }
+        setUint32(0x46464952); setUint32(length - 8); setUint32(0x45564157);
+        setUint32(0x20746d66); setUint32(16); setUint16(1); setUint16(numOfChan);
+        setUint32(abuffer.sampleRate); setUint32(abuffer.sampleRate * 2 * numOfChan);
+        setUint16(numOfChan * 2); setUint16(16); setUint32(0x61746164);
+        setUint32(length - pos - 4);
+        for (let i = 0; i < abuffer.numberOfChannels; i++) {
+            channels.push(abuffer.getChannelData(i));
+        }
+        while (pos < length) {
+            for (let i = 0; i < numOfChan; i++) {
+                const sample = Math.max(-1, Math.min(1, channels[i][offset]));
+                view.setInt16(pos, sample < 0 ? sample * 32768 : sample * 32767, true);
+                pos += 2;
+            }
+            offset++;
+        }
+        return new Blob([buffer], { type: "audio/wav" });
+    }
+
+    sendBtn.addEventListener('click', async () => {
+        progress.textContent = '';
+        result.innerHTML = '';
+        timerDiv.textContent = '';
+        sendBtn.disabled = true;
+
+        if (!apiInput.value || !selectedFile) {
+            progress.textContent = "יש להזין מפתח API ולבחור קובץ";
+            sendBtn.disabled = false;
+            return;
+        }
+        if (selectedFile.size === 0) {
+            progress.textContent = "הקובץ ריק";
+            sendBtn.disabled = false;
+            return;
+        }
+
+        const fileType = selectedFile.type.toLowerCase();
+        const fileExtension = selectedFile.name.split('.').pop().toLowerCase();
+        const isMP3 = fileType.includes('mp3') || fileExtension === 'mp3';
+        const isWAV = fileType.includes('wav') || fileExtension === 'wav';
+        const isM4A = fileType.includes('m4a') || fileExtension === 'm4a';
+        const isMP4 = fileType.includes('mp4') || fileExtension === 'mp4';
+
+        // -- פיצול לפי סוג --
+        let chunks = [];
+        if (isMP3) {
+            if (selectedFile.size > CHUNK_SIZE) {
+                chunks = await splitMp3ByFrameHeaders(selectedFile, CHUNK_SIZE);
+            } else {
+                chunks = [selectedFile];
+            }
+        } else if (isWAV) {
+            if (selectedFile.size > CHUNK_SIZE) {
+                chunks = await splitAudioFileToWavChunks(selectedFile, CHUNK_SIZE);
+            } else {
+                chunks = [selectedFile];
+            }
+        } else if (isM4A || isMP4) {
+            if (selectedFile.size > CHUNK_SIZE) {
+                alert("קבצי M4A/MP4 גדולים אינם נתמכים לפיצול בדפדפן. נא להמיר מראש ל-MP3/WAV או לצמצם את הקובץ.");
+                sendBtn.disabled = false;
+                return;
+            } else {
+                chunks = [selectedFile];
+            }
+        } else {
+            alert("פורמט קובץ לא נתמך. אפשר רק MP3/WAV/M4A/MP4.");
+            sendBtn.disabled = false;
+            return;
+        }
+
+        let allResults = [], hadError = false;
+        for(let i=0; i<chunks.length; ++i) {
+            try {
+                let base64 = await blobToBase64(chunks[i]);
+                let fragRes = await sendChunkToApi(base64, apiInput.value.trim(), i, chunks.length);
+                allResults.push(fragRes);
+                let merged = mergeResults(allResults);
+                result.innerHTML = renderTranscript(merged);
+            } catch(err) {
+                result.innerHTML += `<div style="color:#b00">שגיאה בחלק ${i+1}: ${err.message}</div>`;
+                hadError = true;
+                break;
+            }
+        }
+        timerDiv.textContent = "";
+        if (!hadError) progress.textContent = "הסתיים בהצלחה!";
+        else progress.textContent = "תהליך לא הושלם.";
+        sendBtn.disabled = false;
+    });
+</script>
+</body>
+</html>
