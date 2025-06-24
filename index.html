@@ -2,7 +2,7 @@
 <html lang="he">
 <head>
     <meta charset="UTF-8">
-    <title>Ivrit-AI Transcriber v2.0</title>
+    <title>Ivrit-AI Transcriber v2.1</title>
     <style>
         body { font-family: 'Segoe UI', Arial, sans-serif; direction: rtl; background: #f8f8ff; padding: 2em; }
         .box { background: #fff; border-radius: 1.5em; box-shadow: 0 2px 10px #0001; max-width: 570px; margin: auto; padding: 2em; }
@@ -18,20 +18,19 @@
         table.trans td, table.trans th { border-bottom: 1px solid #dde; padding: 0.35em 0.7em; }
         table.trans th { background: #e5eaff; color:#345;}
         .timestamp { color:#3260e0; font-family: monospace; direction:ltr;}
-        .fragloading { color:#aaa; font-size:0.9em; }
         #timer { color: #888; font-size: 0.96em; margin-top: 0.2em;}
     </style>
 </head>
 <body>
 <div class="box">
     <h2>תמלול עברית עם ivrit.ai</h2>
-    <div class="version">Ivrit-AI Transcriber v2.0</div>
+    <div class="version">Ivrit-AI Transcriber v2.1</div>
     <label>
         מפתח API שלך ב-RunPod:
         <input type="text" id="apiKey" placeholder="הדבק כאן את ה-API KEY שלך">
     </label>
     <label>
-        בחר קובץ אודיו (MP3/WAV, גם מעל 10MB):
+        בחר קובץ אודיו (MP3/WAV):
         <input type="file" id="audioInput" accept=".mp3,.wav,.m4a,audio/*">
     </label>
     <button id="sendBtn" disabled>העלה ושלח לתמלול</button>
@@ -76,20 +75,17 @@
         let shift = 0;
         for (const frag of allResults) {
             if (Array.isArray(frag)) {
-                // מתקן זמן (אם קטע שני+)
                 frag.forEach(row => {
                     row.start += shift;
                     row.end += shift;
                 });
                 all.push(...frag);
-                // shift מתקדם לפי הסוף האחרון
-                if (frag.length) shift = frag[frag.length-1].end;
+                if (frag.length) shift = all[all.length-1].end;
             }
         }
         return all;
     }
 
-    // תצוגה מעוצבת של כל התמלול
     function renderTranscript(resultArr) {
         if (!resultArr || !resultArr.length) return "אין תמלול זמין.";
         let html = `<table class="trans"><thead><tr><th>התחלה</th><th>טקסט</th><th>סיום</th></tr></thead><tbody>`;
@@ -105,7 +101,6 @@
         return html;
     }
 
-    // קידוד Blob לבייס64
     function blobToBase64(blob) {
         return new Promise((resolve, reject) => {
             const reader = new FileReader();
@@ -115,7 +110,6 @@
         });
     }
 
-    // שליחת קטע ל-API, קבלת תוצאה, כולל polling
     async function sendChunkToApi(base64, apiKey, fragIdx, totalFrags) {
         const payload = {
             input: {
@@ -138,7 +132,6 @@
         if (!response.ok) throw new Error("שגיאת שליחה: " + response.status);
         const data = await response.json();
         if (!data.id) throw new Error("לא התקבל מזהה עבודה מה-API");
-        // Polling
         return await pollForResult(data.id, apiKey, fragIdx, totalFrags);
     }
 
@@ -155,7 +148,6 @@
             if (!res.ok) throw new Error("שגיאת polling: " + res.status);
             const data = await res.json();
             if (data.status === "COMPLETED") {
-                // יתכן data.output.text או data.output.result
                 if (Array.isArray(data.output?.result)) return data.output.result;
                 if (typeof data.output?.text === "string") return [{start:0,end:0,text:data.output.text}];
                 return [];
@@ -167,7 +159,6 @@
         throw new Error("פג זמן ההמתנה לקטע " + (fragIdx+1));
     }
 
-    // חיתוך Blob לחלקים של עד 10MB
     function splitBlob(blob, chunkSize) {
         let frags = [];
         for(let i=0; i<blob.size; i+=chunkSize) {
@@ -193,13 +184,30 @@
             return;
         }
 
-        let frags = splitBlob(selectedFile, CHUNK_SIZE);
-        progress.innerHTML = frags.length > 1 ? `הקובץ גדול – יפוצל ל-${frags.length} חלקים.<br>המתן לתמלול רציף.` : "מעבד קובץ...";
+        if (selectedFile.size <= CHUNK_SIZE) {
+            // קובץ עד 10MB - שלח רגיל
+            try {
+                progress.innerHTML = "מעבד קובץ...";
+                let base64 = await blobToBase64(selectedFile);
+                let chunkRes = await sendChunkToApi(base64, apiInput.value.trim(), 0, 1);
+                result.innerHTML = renderTranscript(chunkRes);
+                progress.textContent = "הסתיים בהצלחה!";
+                timerDiv.textContent = "";
+            } catch(err) {
+                result.innerHTML = `<div style="color:#b00">שגיאה: ${err.message}</div>`;
+                progress.textContent = "תהליך לא הושלם.";
+                timerDiv.textContent = "";
+            }
+            sendBtn.disabled = false;
+            return;
+        }
 
+        // קובץ גדול – פיצול
+        let frags = splitBlob(selectedFile, CHUNK_SIZE);
+        progress.innerHTML = `הקובץ גדול – יפוצל ל-${frags.length} חלקים.<br>המתן, התמלול יוצג חלק-חלק.`;
         let allResults = [], hadError = false;
         for(let i=0; i<frags.length; ++i) {
             try {
-                // קידוד ושליחה
                 let base64 = await blobToBase64(frags[i]);
                 let fragRes = await sendChunkToApi(base64, apiInput.value.trim(), i, frags.length);
                 allResults.push(fragRes);
